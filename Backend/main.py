@@ -1,28 +1,29 @@
 import os
+import logging
+from typing import Optional, Any
+
 from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
 import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
-from typing import Optional, Union, Any
-import logging
 
-# Import local modules - Ensure these files exist in the same directory!
+# Ensure these local files exist in your directory
 from database import get_db, engine
 import models
 
-# Setup Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
+# --- Setup & Configuration ---
 load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
 
-# 1. CORS Middleware (Must be FIRST)
+# 1. CORS Middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -31,11 +32,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. Cloudinary Config
+# 2. Cloudinary Configuration
 cloudinary.config(
     cloud_name=os.getenv("CLOUD_NAME"),
     api_key=os.getenv("API_KEY"),
-    api_secret=os.getenv("API_SECRET")
+    api_secret=os.getenv("API_SECRET"),
+    secure=True
 )
 
 # --- Pydantic Schemas ---
@@ -57,7 +59,7 @@ class PolicyCreate(BaseModel):
     amount_limit: int
     description: str
 
-# --- Startup ---
+# --- Database Initialization ---
 @app.on_event("startup")
 def seed_admin_only():
     db = next(get_db())
@@ -74,7 +76,77 @@ def seed_admin_only():
         logger.info("✅ Master Admin (ID: 1) initialized.")
     db.close()
 
-# --- Core Routes ---
+# --- Core Request Routes ---
+
+@app.post("/request")
+async def create_request(
+    emp_id: int = Form(...), 
+    category: str = Form(...), 
+    description: str = Form(...),
+    file: Optional[UploadFile] = File(None), # Optional File
+    db: Session = Depends(get_db)
+):
+    try:
+        user = db.query(models.User).filter_by(emp_id=emp_id).first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        image_url = None
+        
+        # LOGIC: Only upload if a file exists and has a filename
+        if file and file.filename:
+            file.file.seek(0)
+            upload_result = cloudinary.uploader.upload(
+                file.file,
+                resource_type="auto",
+                folder="reimbursements"
+            )
+            image_url = upload_result.get("secure_url")
+
+        initial_status = "Awaiting Finance" if user.role == "manager" else "Pending"
+
+        new_req = models.Requests(
+            emp_id=emp_id,
+            category=category,
+            description=description,
+            image_path=image_url, # Will be None if no file uploaded
+            status=initial_status
+        )
+        db.add(new_req)
+        db.commit()
+        return {"message": "Request created successfully", "status": initial_status}
+        
+    except Exception as e:
+        logger.error(f"Request Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server Error: {str(e)}")
+
+@app.put("/request/{req_id}")
+def update_request(req_id: int, data: RequestUpdate, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    req.category = data.category
+    req.description = data.description
+    req.status = "Pending" # Reset status for re-approval
+    
+    db.commit()
+    return {"message": "Request updated successfully"}
+
+@app.delete("/request/{req_id}")
+def delete_request(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    if req.status != "Pending":
+        raise HTTPException(status_code=400, detail="Cannot delete processed requests")
+
+    db.delete(req)
+    db.commit()
+    return {"message": "Deleted"}
+
+# --- Dashboard & User Management ---
 
 @app.post("/dashboard")
 def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
@@ -96,7 +168,7 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
         response["finance_queue"] = db.query(models.Requests)\
             .filter(models.Requests.status.in_(["Manager Approved", "Awaiting Finance"])).all()
 
-    elif user.role == "audit" or user.role == "admin":
+    elif user.role in ["audit", "admin"]:
         response["all_requests"] = db.query(models.Requests).all()
         if user.role == "admin":
             response["stats"] = {
@@ -107,166 +179,80 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
             }
     return response
 
-@app.post("/request")
-async def create_request(
-    emp_id: int = Form(...), 
-    category: str = Form(...), 
-    description: str = Form(...),
-    file: UploadFile = File(...), 
-    db: Session = Depends(get_db)
-):
-    print("Step 1: Received request from frontend")
-    try:
-        # 1. Verify User
-        user = db.query(models.User).filter_by(emp_id=emp_id).first()
-        if not user:
-            raise HTTPException(status_code=404, detail="User not found")
-        print("Step 2: User found in database")
-        
-        # 2. Prepare the file for upload
-        # This ensures the 'cursor' is at the start of the file data
-        await file.seek(0) 
-        file_content = await file.read() # Reading into memory helps avoid stream resets
-        
-        print("Step 3: Starting Cloudinary Upload...")
-        # 3. Upload to Cloudinary with explicit parameters
-        upload = cloudinary.uploader.upload(
-            file_content,
-            resource_type="auto",
-            folder="reimbursements",
-            use_filename=True,
-            unique_filename=True
-        )
-        print("Step 4: Cloudinary Upload Successful")
-
-        # 4. Determine status and save to DB
-        initial_status = "Awaiting Finance" if user.role == "manager" else "Pending"
-
-        req = models.Requests(
-            emp_id=emp_id,
-            category=category,
-            description=description,
-            image_path=upload["secure_url"],
-            status=initial_status
-        )
-        db.add(req)
-        db.commit()
-        return {"message": "Request created", "status": initial_status}
-
-    except Exception as e:
-        logger.error(f"Error in /request: {str(e)}")
-        # If it's a Cloudinary specific error, it will be caught here
-        raise HTTPException(status_code=500, detail=f"Upload Failed: {str(e)}")
-
-# 3. THE NEW UPDATE ROUTE
-@app.put("/request/{req_id}")
-def update_request(req_id: int, data: RequestUpdate, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if not req:
-        raise HTTPException(status_code=404, detail="Request not found")
-    
-    req.category = data.category
-    req.description = data.description
-    
-    # Optional: Reset status to Pending so it can be re-approved
-    req.status = "Pending"
-    
-    db.commit()
-    return {"message": "Request updated successfully"}
-
-# --- Admin Management ---
 @app.get("/admin/users")
 def get_users(db: Session = Depends(get_db)):
-    print(db.query(models.User).all())
     return db.query(models.User).all()
 
 @app.post("/admin/user")
 def add_user(user: UserCreate, db: Session = Depends(get_db)):
     m_id = user.manager_id
-    if m_id == "" or m_id == 0 or m_id is None:
+    # Clean up manager_id
+    if m_id in ["", 0, None]:
         m_id = None
     else:
         try:
             m_id = int(m_id)
-            manager_exists = db.query(models.User).filter_by(emp_id=m_id).first()
-            if not manager_exists:
-                raise HTTPException(status_code=400, detail=f"Manager ID {m_id} not found.")
-        except ValueError:
-            m_id = None
+            if not db.query(models.User).filter_by(emp_id=m_id).first():
+                raise HTTPException(status_code=400, detail=f"Manager {m_id} doesn't exist")
+        except: m_id = None
 
-    existing_user = db.query(models.User).filter_by(emp_id=user.emp_id).first()
-    if existing_user:
-        raise HTTPException(status_code=400, detail="Employee ID already exists.")
+    if db.query(models.User).filter_by(emp_id=user.emp_id).first():
+        raise HTTPException(status_code=400, detail="ID already exists")
 
-    db_user = models.User(
-        emp_id=user.emp_id,
-        name=user.name,
-        role=user.role,
-        manager_id=m_id
-    )
-    db.add(db_user)
+    new_user = models.User(emp_id=user.emp_id, name=user.name, role=user.role, manager_id=m_id)
+    db.add(new_user)
     db.commit()
-    return {"message": "User Added"}
+    return {"message": "User added"}
 
 @app.delete("/admin/user/{emp_id}")
 def delete_user(emp_id: int, db: Session = Depends(get_db)):
-    if emp_id == 1:
-        raise HTTPException(status_code=400, detail="Cannot delete Master Admin.")
+    if emp_id == 1: raise HTTPException(status_code=400, detail="Cannot delete Master Admin")
     user = db.query(models.User).filter_by(emp_id=emp_id).first()
     if user:
         db.delete(user)
         db.commit()
-    return {"message": "Deleted"}
+    return {"message": "User deleted"}
+
+# --- Status Update Routes ---
+
+@app.put("/manager/approve/{req_id}")
+def manager_approve(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if req: 
+        req.status = "Manager Approved"
+        db.commit()
+    return {"msg": "Approved"}
+
+@app.put("/manager/reject/{req_id}")
+def manager_reject(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if req: 
+        req.status = "Rejected"
+        db.commit()
+    return {"msg": "Rejected"}
+
+@app.put("/finance/approve/{req_id}")
+def finance_approve(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if req: 
+        req.status = "Paid"
+        db.commit()
+    return {"msg": "Paid"}
+
+@app.put("/finance/pay/{req_id}")
+def finance_pay(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if req: 
+        req.status = "Paid"
+        db.commit()
+    return {"msg": "Paid"}
+
+@app.get("/policies")
+def get_policies(db: Session = Depends(get_db)):
+    return db.query(models.Policy).all()
 
 @app.post("/admin/policy")
 def create_policy(policy: PolicyCreate, db: Session = Depends(get_db)):
     db.merge(models.Policy(**policy.dict()))
     db.commit()
     return {"message": "Policy Updated"}
-
-@app.get("/policies")
-def get_policies(db: Session = Depends(get_db)):
-    return db.query(models.Policy).all()
-
-# --- Status Updates & Finance ---
-
-@app.put("/manager/approve/{req_id}")
-def approve(req_id: int, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if not req: raise HTTPException(status_code=404, detail="Request not found")
-    req.status = "Manager Approved"
-    db.commit()
-    return {"msg": "OK"}
-
-@app.put("/manager/reject/{req_id}")
-def manager_reject(req_id: int, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if not req: raise HTTPException(status_code=404, detail="Request not found")
-    req.status = "Rejected"
-    db.commit()
-    return {"message": "Rejected"}
-
-@app.put("/finance/approve/{req_id}")
-def finance_approve(req_id: int, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if not req: raise HTTPException(status_code=404, detail="Not found")
-    req.status = "Paid"
-    db.commit()
-    return {"message": "Approved and Paid"}
-
-@app.put("/finance/reject/{req_id}")
-def finance_reject(req_id: int, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if not req: raise HTTPException(status_code=404, detail="Not found")
-    req.status = "Rejected by Finance"
-    db.commit()
-    return {"message": "Rejected"}
-
-@app.put("/finance/pay/{req_id}")
-def finance_pay(req_id: int, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if not req: 
-        raise HTTPException(status_code=404, detail="Request not found")
-    req.status = "Paid"
-    db.commit()
-    return {"message": "Payment Released Successfully"}
