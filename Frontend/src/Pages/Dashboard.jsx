@@ -1,0 +1,120 @@
+import { useEffect, useState } from "react";
+import api from "../api";
+
+// Component Imports
+import Topbar from "../Components/Topbar";
+import Sidebar from "../Components/Sidebar";
+import EmployeeView from "../Components/EmployeeView";
+import ManagerView from "../Components/ManagerView";
+import FinanceView from "../Components/FinanceView";
+import AuditView from "../Components/AuditView";
+import AdminView from "../Components/AdminView";
+
+export default function Dashboard() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  
+  const emp_id = localStorage.getItem("emp_id");
+
+  useEffect(() => {
+    if (!emp_id) {
+      setError("No user ID found. Please login again.");
+      setLoading(false);
+      return;
+    }
+
+    // Fetching dashboard data from FastAPI
+    api.post("/dashboard", { emp_id: parseInt(emp_id) })
+      .then((res) => {
+        setData(res.data);
+        setLoading(false);
+      })
+      .catch((err) => {
+        console.error("API Error:", err);
+        setError("Failed to connect to the server. Is the backend running?");
+        setLoading(false);
+      });
+  }, [emp_id]);
+
+  // 1. Loading State
+  if (loading) {
+    return (
+      <div className="h-screen w-full flex flex-col items-center justify-center bg-gray-50">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mb-4"></div>
+        <p className="text-gray-500 font-medium italic">Loading your workspace...</p>
+      </div>
+    );
+  }
+
+  // 2. Error State
+  if (error) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-gray-50 p-4">
+        <div className="bg-white p-8 rounded-2xl shadow-xl max-w-md text-center border border-red-100">
+          <div className="text-red-500 text-5xl mb-4">⚠️</div>
+          <h2 className="text-xl font-bold text-gray-800 mb-2">System Error</h2>
+          <p className="text-gray-600 mb-6">{error}</p>
+          <button 
+            onClick={() => window.location.href = "/"}
+            className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition-all"
+          >
+            Back to Login
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // 3. Main Dashboard Layout
+  return (
+    <div className="flex min-h-screen bg-[#F8FAFC]"> {/* Slate-50 background */}
+      
+      {/* Dynamic Sidebar - passes role to show/hide links */}
+      {/* <Sidebar role={data.role} /> */}
+
+      <div className="flex-1 flex flex-col">
+        {/* Modern Topbar - passes name/role for the profile badge */}
+        <Topbar name={data.name} role={data.role} />
+
+        <main className="p-8 overflow-y-auto">
+          {/* Welcome Header */}
+          <header className="mb-8">
+            <h1 className="text-3xl font-extrabold text-slate-900 tracking-tight">
+              Hello, {data.name}
+            </h1>
+            <p className="text-slate-500 font-medium">
+              Here is what is happening with the system today.
+            </p>
+          </header>
+
+          {/* Conditional Role-Based Views */}
+          <div className="transition-all duration-500">
+            {data.role === "employee" && (
+              <EmployeeView requests={data.my_requests} />
+            )}
+
+            {data.role === "manager" && (
+              <ManagerView 
+                teamRequests={data.team_requests} 
+                myRequests={data.my_requests} 
+              />
+            )}
+
+            {data.role === "finance" && (
+              <FinanceView requests={data.finance_queue} />
+            )}
+
+            {data.role === "audit" && (
+              <AuditView requests={data.all_requests} />
+            )}
+
+            {data.role === "admin" && (
+              <AdminView data={data} />
+            )}
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
