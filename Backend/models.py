@@ -7,6 +7,7 @@ class User(Base):
 
     emp_id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
+    password = Column(String, nullable=False)
     role = Column(String(20), nullable=False)  # valid values: 'employee', 'manager', 'finance', 'admin'
     manager_id = Column(Integer, ForeignKey("users.emp_id"), nullable=True)
 

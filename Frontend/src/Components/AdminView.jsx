@@ -12,6 +12,7 @@ export default function AdminView({ data }) {
   const [newUser, setNewUser] = useState({
     emp_id: "",
     name: "",
+    password: "",
     role: "employee",
     manager_id: "",
   });
@@ -42,6 +43,7 @@ export default function AdminView({ data }) {
         emp_id: parseInt(newUser.emp_id),
         // If role is high-level, backend sets manager to 1.
         // If employee, use input. If empty, send null.
+        password: newUser.password,
         manager_id: newUser.manager_id ? parseInt(newUser.manager_id) : null,
       };
 
@@ -143,6 +145,14 @@ export default function AdminView({ data }) {
               required
               value={newUser.name}
               onChange={(e) => setNewUser({ ...newUser, name: e.target.value })}
+            />
+            <input
+              className="border p-2.5 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"
+              placeholder="Password"
+              type="password"
+              required
+              value={newUser.password}
+              onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
             />
             <select
               className="border p-2.5 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500"

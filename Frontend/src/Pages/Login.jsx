@@ -1,54 +1,85 @@
-import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useState } from "react";
+import { useAuth } from "../context/AuthContext";
 import api from "../api";
 
 export default function Login() {
-  const [profiles, setProfiles] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+
   const navigate = useNavigate();
+  const { login } = useAuth();
 
-  useEffect(() => {
-    // Fetch whoever is in the database
-    api.get("/admin/users")
-      .then((res) => {
-        setProfiles(res.data);
-        setLoading(false);
-      })
-      .catch(() => setLoading(false));
-  }, []);
+  const handleLogin = async (e) => {
+    e.preventDefault();
+    console.log("Reaches 1");
+    if (!username || !password) {
+      setError("Please enter name and password");
+      return;
+    }
+    console.log("Reaches 2");
+    try {
+      const res = await api.post("/login", {
+        name: username,
+        password: password,
+      });
+      console.log(res);
+      localStorage.setItem("emp_id", res.data.emp_id);
 
-  const handleLogin = (id) => {
-    localStorage.setItem("emp_id", id);
-    navigate("/dashboard");
+      localStorage.setItem("role", res.data.role);
+      localStorage.setItem("name", res.data.name);
+      console.log("Reaches here")
+      login(res.data); // save user in context
+      navigate("/dashboard"); // ONLY ROUTE
+    } catch (err) {
+      setError("Invalid credentials");
+    }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-100">
-      <div className="bg-white p-8 rounded-2xl shadow-xl w-full max-w-sm">
-        <h1 className="text-2xl font-black text-center mb-6 text-gray-800 tracking-tight">
-          PORTAL ACCESS
-        </h1>
-        
-        {loading ? (
-          <div className="text-center py-4 text-gray-400 animate-pulse">Checking database...</div>
-        ) : (
-          <div className="space-y-3">
-            {profiles.map((p) => (
-              <button
-                key={p.emp_id}
-                onClick={() => handleLogin(p.emp_id)}
-                className="w-full p-4 text-left border-2 border-gray-100 rounded-xl hover:border-blue-500 hover:bg-blue-50 transition-all flex justify-between items-center group"
-              >
-                <div>
-                  <p className="font-bold text-gray-900">{p.name}</p>
-                  <p className="text-[10px] uppercase font-black text-blue-500">{p.role}</p>
-                </div>
-                <span className="text-gray-300 group-hover:text-blue-500">→</span>
-              </button>
-            ))}
+    <div className="min-h-screen flex items-center justify-center bg-slate-100">
+      <form
+        onSubmit={handleLogin}
+        className="bg-white p-8 rounded-2xl shadow-md w-full max-w-sm space-y-4"
+      >
+        <h2 className="text-2xl font-black text-center text-slate-800">
+          Expense Management
+        </h2>
+
+        {error && (
+          <div className="bg-red-100 text-red-600 text-sm p-2 rounded">
+            {error}
           </div>
         )}
-      </div>
+
+        <div>
+          <label className="text-sm font-bold text-slate-600">Name</label>
+          <input
+            className="w-full border p-2 rounded-lg mt-1 focus:ring-2 focus:ring-blue-500 outline-none"
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+          />
+        </div>
+
+        <div>
+          <label className="text-sm font-bold text-slate-600">Password</label>
+          <input
+            className="w-full border p-2 rounded-lg mt-1 focus:ring-2 focus:ring-blue-500 outline-none"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+          />
+        </div>
+
+        <button
+          type="submit"
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 rounded-lg transition"
+        >
+          Login
+        </button>
+      </form>
     </div>
   );
 }

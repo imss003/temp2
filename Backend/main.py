@@ -1,6 +1,6 @@
 import os
 import logging
-from typing import Optional, Any
+from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -24,15 +24,6 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # 1. CORS Middleware
-# main.py
-
-# ... imports ...
-
-app = FastAPI()
-
-# Define the specific origin of your frontend
-# If using Vite, it is usually http://localhost:5173
-# If using Create React App, it is usually http://localhost:3000
 origins = [
     "http://localhost:3000", 
     "http://localhost:5173",
@@ -40,7 +31,7 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,      # <--- CHANGED from ["*"] to specific list
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -63,13 +54,12 @@ class UserCreate(BaseModel):
     emp_id: int
     name: str
     role: str
-    # Accepts int or None
+    password: str  # Matches models.User.password
     manager_id: Optional[int] = None 
 
 class RequestUpdate(BaseModel):
     category: str
     description: str
-    # FIX: Added amount here, otherwise data.amount fails in the route
     amount: float 
 
 class PolicyCreate(BaseModel):
@@ -77,15 +67,20 @@ class PolicyCreate(BaseModel):
     amount_limit: int
     description: str
 
+class LoginRequest(BaseModel):
+    name: str
+    password: str
+
 # --- Database Initialization ---
 @app.on_event("startup")
 def seed_admin_only():
     db = next(get_db())
-    # check if ANY user exists to prevent constant re-querying on restarts in production
+    # check if Master Admin exists
     if not db.query(models.User).filter_by(emp_id=1).first():
         master_admin = models.User(
             emp_id=1, 
             name="Master Admin", 
+            password="admin123", # Added default password
             role="admin", 
             manager_id=None
         )
@@ -111,8 +106,6 @@ async def create_request(
             raise HTTPException(status_code=404, detail="User not found")
 
         image_url = None
-        
-        # Upload to Cloudinary only if file is provided
         if file and file.filename:
             file.file.seek(0)
             upload_result = cloudinary.uploader.upload(
@@ -122,7 +115,6 @@ async def create_request(
             )
             image_url = upload_result.get("secure_url")
 
-        # Logic: If Manager submits, skip Manager Approval step
         initial_status = "Awaiting Finance" if user.role == "manager" else "Pending"
 
         new_req = models.Requests(
@@ -150,7 +142,6 @@ def update_request(req_id: int, data: RequestUpdate, db: Session = Depends(get_d
     req.category = data.category
     req.description = data.description
     req.amount = data.amount
-    # Reset status so it has to be approved again
     req.status = "Pending" 
     
     db.commit()
@@ -183,18 +174,13 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
         response["my_requests"] = db.query(models.Requests).filter_by(emp_id=user.emp_id).all()
     
     elif user.role == "manager":
-        # Get requests from anyone who reports to this manager
         team_ids = [u.emp_id for u in db.query(models.User).filter_by(manager_id=user.emp_id).all()]
-        
-        # Only show Pending requests in the team queue
         response["team_requests"] = db.query(models.Requests)\
             .filter(models.Requests.emp_id.in_(team_ids))\
             .filter(models.Requests.status == "Pending").all()
-            
         response["my_requests"] = db.query(models.Requests).filter_by(emp_id=user.emp_id).all()
 
     elif user.role == "finance":
-        # Finance sees Manager Approved items OR items submitted directly by Managers
         response["finance_queue"] = db.query(models.Requests)\
             .filter(models.Requests.status.in_(["Manager Approved", "Awaiting Finance"])).all()
 
@@ -213,32 +199,28 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
 def get_users(db: Session = Depends(get_db)):
     return db.query(models.User).all()
 
-# ... inside main.py ...
-
 @app.post("/admin/user")
 def add_user(user: UserCreate, db: Session = Depends(get_db)):
     m_id = user.manager_id
     
-    # --- LOGIC UPDATE START ---
-    # Automatically assign Manager ID = 1 (Master Admin) for specific roles
+    # Auto-assign Admin as manager for specific roles
     if user.role in ["manager", "finance", "audit"]:
         m_id = 1
-    # --- LOGIC UPDATE END ---
-    
-    # Logic: Only check DB if m_id is actually provided (not None or 0)
     elif m_id:
         manager_exists = db.query(models.User).filter_by(emp_id=m_id).first()
         if not manager_exists:
             raise HTTPException(status_code=400, detail=f"Manager ID {m_id} does not exist")
     else:
-        m_id = None # Ensure 0 becomes None for database consistency
+        m_id = None
 
     if db.query(models.User).filter_by(emp_id=user.emp_id).first():
         raise HTTPException(status_code=400, detail="User ID already exists")
 
+    # Created user using the full schema including password
     new_user = models.User(
         emp_id=user.emp_id, 
         name=user.name, 
+        password=user.password, # Critical fix: Include password
         role=user.role, 
         manager_id=m_id
     )
@@ -276,7 +258,6 @@ def manager_reject(req_id: int, db: Session = Depends(get_db)):
     req = db.query(models.Requests).filter_by(req_id=req_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-        
     req.status = "Rejected"
     db.commit()
     return {"msg": "Rejected"}
@@ -286,7 +267,6 @@ def finance_approve(req_id: int, db: Session = Depends(get_db)):
     req = db.query(models.Requests).filter_by(req_id=req_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-        
     req.status = "Paid"
     db.commit()
     return {"msg": "Paid"}
@@ -299,7 +279,6 @@ def get_policies(db: Session = Depends(get_db)):
 
 @app.post("/admin/policy")
 def create_policy(policy: PolicyCreate, db: Session = Depends(get_db)):
-    # Merge handles both insert and update if primary key matches
     existing = db.query(models.Policy).filter_by(category=policy.category).first()
     if existing:
         existing.amount_limit = policy.amount_limit
@@ -307,22 +286,21 @@ def create_policy(policy: PolicyCreate, db: Session = Depends(get_db)):
     else:
         new_policy = models.Policy(**policy.dict())
         db.add(new_policy)
-        
     db.commit()
     return {"message": "Policy Updated"}
 
-# manager can see their team members
-@app.get("/manager/team/{manager_id}")
-def get_team_members(manager_id: int, db: Session = Depends(get_db)):
-    # Verify the manager exists first
-    manager = db.query(models.User).filter_by(emp_id=manager_id).first()
-    if not manager:
-        raise HTTPException(status_code=404, detail="Manager not found")
+@app.post("/login")
+def login_user(data: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(
+        models.User.name == data.name,
+        models.User.password == data.password
+    ).first()
 
-    # Query: Find all users where the 'manager_id' matches the requested ID
-    team_members = db.query(models.User).filter_by(manager_id=manager_id).all()
-    
-    if not team_members:
-        return {"message": "No direct reports found", "team": []}
+    if not user:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    return {"team": team_members}
+    return {
+        "emp_id": user.emp_id,
+        "name": user.name,
+        "role": user.role
+    }
