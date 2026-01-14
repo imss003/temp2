@@ -49,7 +49,7 @@ export default function AdminView({ data }) {
 
       await api.post("/admin/user", payload);
       
-      setNewUser({ emp_id: "", name: "", role: "employee", manager_id: "" });
+      setNewUser({ emp_id: "", name: "", role: "employee", password: "", manager_id: "" });
       fetchUsers();
       alert("User added successfully!");
     } catch (err) {
@@ -170,7 +170,7 @@ export default function AdminView({ data }) {
             <div className="relative">
               <input
                 className={`w-full border p-2.5 rounded-xl text-sm outline-none focus:ring-2 focus:ring-blue-500 ${isAutoManagerRole ? 'bg-gray-100 text-gray-400' : ''}`}
-                placeholder={isAutoManagerRole ? "Auto-assigned to Admin" : "Manager ID (Optional)"}
+                placeholder={isAutoManagerRole ? "Auto-assigned to Admin" : "Manager ID"}
                 type="number"
                 disabled={isAutoManagerRole}
                 value={newUser.manager_id}

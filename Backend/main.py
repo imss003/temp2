@@ -1,13 +1,14 @@
 import os
 import logging
+import shutil
+import time
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Form, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy.orm import Session
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
-import cloudinary
-import cloudinary.uploader
 from dotenv import load_dotenv
 
 # Ensure 'database.py' exists with get_db and engine
@@ -23,6 +24,14 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
+# Create uploads directory for local storage if it doesn't exist
+UPLOAD_DIR = "uploads"
+if not os.path.exists(UPLOAD_DIR):
+    os.makedirs(UPLOAD_DIR)
+
+# Mount the static files so images can be viewed via URL
+app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
+
 # 1. CORS Middleware
 origins = [
     "http://localhost:3000", 
@@ -37,14 +46,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. Cloudinary Configuration
-cloudinary.config(
-    cloud_name=os.getenv("CLOUD_NAME"),
-    api_key=os.getenv("API_KEY"),
-    api_secret=os.getenv("API_SECRET"),
-    secure=True
-)
-
 # --- Pydantic Schemas ---
 
 class DashboardRequest(BaseModel):
@@ -54,7 +55,7 @@ class UserCreate(BaseModel):
     emp_id: int
     name: str
     role: str
-    password: str  # Matches models.User.password
+    password: str
     manager_id: Optional[int] = None 
 
 class RequestUpdate(BaseModel):
@@ -75,12 +76,11 @@ class LoginRequest(BaseModel):
 @app.on_event("startup")
 def seed_admin_only():
     db = next(get_db())
-    # check if Master Admin exists
     if not db.query(models.User).filter_by(emp_id=1).first():
         master_admin = models.User(
             emp_id=1, 
             name="Master Admin", 
-            password="admin123", # Added default password
+            password="admin123",
             role="admin", 
             manager_id=None
         )
@@ -106,14 +106,17 @@ async def create_request(
             raise HTTPException(status_code=404, detail="User not found")
 
         image_url = None
+        # --- LOCAL STORAGE LOGIC ---
         if file and file.filename:
-            file.file.seek(0)
-            upload_result = cloudinary.uploader.upload(
-                file.file,
-                resource_type="auto",
-                folder="reimbursements"
-            )
-            image_url = upload_result.get("secure_url")
+            file_extension = file.filename.split(".")[-1]
+            unique_filename = f"{int(time.time())}_{emp_id}.{file_extension}"
+            file_path = os.path.join(UPLOAD_DIR, unique_filename)
+
+            with open(file_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            
+            # Construct the local URL
+            image_url = f"http://localhost:8000/uploads/{unique_filename}"
 
         initial_status = "Awaiting Finance" if user.role == "manager" else "Pending"
 
@@ -127,7 +130,7 @@ async def create_request(
         )
         db.add(new_req)
         db.commit()
-        return {"message": "Request created successfully", "status": initial_status}
+        return {"message": "Request created successfully", "status": initial_status, "url": image_url}
         
     except Exception as e:
         logger.error(f"Request Error: {str(e)}")
@@ -171,21 +174,32 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
     response = {"emp_id": user.emp_id, "name": user.name, "role": user.role}
 
     if user.role == "employee":
-        response["my_requests"] = db.query(models.Requests).filter_by(emp_id=user.emp_id).all()
+        response["my_requests"] = db.query(models.Requests)\
+            .options(joinedload(models.Requests.employee))\
+            .filter_by(emp_id=user.emp_id).all()
     
     elif user.role == "manager":
         team_ids = [u.emp_id for u in db.query(models.User).filter_by(manager_id=user.emp_id).all()]
+        
+        # Team Requests with Names
         response["team_requests"] = db.query(models.Requests)\
+            .options(joinedload(models.Requests.employee))\
             .filter(models.Requests.emp_id.in_(team_ids))\
             .filter(models.Requests.status == "Pending").all()
-        response["my_requests"] = db.query(models.Requests).filter_by(emp_id=user.emp_id).all()
+        
+        # Manager's own requests with Names
+        response["my_requests"] = db.query(models.Requests)\
+            .options(joinedload(models.Requests.employee))\
+            .filter_by(emp_id=user.emp_id).all()
 
     elif user.role == "finance":
         response["finance_queue"] = db.query(models.Requests)\
+            .options(joinedload(models.Requests.employee))\
             .filter(models.Requests.status.in_(["Manager Approved", "Awaiting Finance"])).all()
 
     elif user.role in ["audit", "admin"]:
-        response["all_requests"] = db.query(models.Requests).all()
+        response["all_requests"] = db.query(models.Requests)\
+            .options(joinedload(models.Requests.employee)).all()
         if user.role == "admin":
             response["stats"] = {
                 "total_users": db.query(models.User).count(),
@@ -202,11 +216,11 @@ def get_users(db: Session = Depends(get_db)):
 @app.post("/admin/user")
 def add_user(user: UserCreate, db: Session = Depends(get_db)):
     m_id = user.manager_id
-    
-    # Auto-assign Admin as manager for specific roles
     if user.role in ["manager", "finance", "audit"]:
         m_id = 1
-    elif m_id:
+    elif user.role == "employee":
+        if not m_id:
+            raise HTTPException(status_code=400, detail="Manager ID is required for Employees")
         manager_exists = db.query(models.User).filter_by(emp_id=m_id).first()
         if not manager_exists:
             raise HTTPException(status_code=400, detail=f"Manager ID {m_id} does not exist")
@@ -216,11 +230,10 @@ def add_user(user: UserCreate, db: Session = Depends(get_db)):
     if db.query(models.User).filter_by(emp_id=user.emp_id).first():
         raise HTTPException(status_code=400, detail="User ID already exists")
 
-    # Created user using the full schema including password
     new_user = models.User(
         emp_id=user.emp_id, 
         name=user.name, 
-        password=user.password, # Critical fix: Include password
+        password=user.password,
         role=user.role, 
         manager_id=m_id
     )
@@ -232,11 +245,9 @@ def add_user(user: UserCreate, db: Session = Depends(get_db)):
 def delete_user(emp_id: int, db: Session = Depends(get_db)):
     if emp_id == 1: 
         raise HTTPException(status_code=400, detail="Cannot delete Master Admin")
-    
     user = db.query(models.User).filter_by(emp_id=emp_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-        
     db.delete(user)
     db.commit()
     return {"message": "User deleted"}
@@ -248,7 +259,6 @@ def manager_approve(req_id: int, db: Session = Depends(get_db)):
     req = db.query(models.Requests).filter_by(req_id=req_id).first()
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
-    
     req.status = "Manager Approved"
     db.commit()
     return {"msg": "Approved"}
@@ -289,18 +299,22 @@ def create_policy(policy: PolicyCreate, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Policy Updated"}
 
+# --- Manager Team Route ---
+@app.get("/manager/team/{manager_id}")
+def get_team_members(manager_id: int, db: Session = Depends(get_db)):
+    manager = db.query(models.User).filter_by(emp_id=manager_id).first()
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+    team_members = db.query(models.User).filter_by(manager_id=manager_id).all()
+    return {"team": team_members}
+
+# --- Login Route ---
 @app.post("/login")
 def login_user(data: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(models.User).filter(
         models.User.name == data.name,
         models.User.password == data.password
     ).first()
-
     if not user:
         raise HTTPException(status_code=401, detail="Invalid credentials")
-
-    return {
-        "emp_id": user.emp_id,
-        "name": user.name,
-        "role": user.role
-    }
+    return {"emp_id": user.emp_id, "name": user.name, "role": user.role}
