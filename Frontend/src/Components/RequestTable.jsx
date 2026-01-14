@@ -8,6 +8,7 @@ export default function RequestTable({ requests, actions }) {
     }).format(amount);
   };
 
+  // 2. Helper for Status Badge Styling
   const getStatusStyle = (status) => {
     switch (status) {
       case "Paid":
@@ -44,15 +45,26 @@ export default function RequestTable({ requests, actions }) {
               <tr key={r.req_id} className="hover:bg-gray-50 transition-colors">
                 <td className="p-4 font-medium text-gray-900">#{r.req_id}</td>
 
-                {/* UPDATED "REQUEST BY" COLUMN WITH FALLBACK LOGIC */}
+                {/* UPDATED "REQUEST BY" COLUMN WITH NAME AND ROLE BADGE */}
                 <td className="p-4">
-                  <div className="flex flex-col">
-                    <span className="font-bold text-gray-800">
-                      {r.employee?.name || 
-                        (String(r.emp_id) === localStorage.getItem("emp_id") 
-                          ? localStorage.getItem("name") 
-                          : "Unknown User")}
-                    </span>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-bold text-gray-800">
+                        {r.employee?.name || 
+                          (String(r.emp_id) === localStorage.getItem("emp_id") 
+                            ? localStorage.getItem("name") 
+                            : "Unknown User")}
+                      </span>
+                      
+                      {/* DYNAMIC ROLE BADGE */}
+                      <span className={`text-[9px] px-1.5 py-0.5 rounded font-black uppercase tracking-tighter border ${
+                        r.employee?.role === 'manager' 
+                          ? "bg-purple-50 text-purple-600 border-purple-100" 
+                          : "bg-slate-50 text-slate-500 border-slate-100"
+                      }`}>
+                        {r.employee?.role || "User"}
+                      </span>
+                    </div>
                     <span className="text-[10px] text-gray-400 font-mono">
                       ID: #{r.emp_id}
                     </span>

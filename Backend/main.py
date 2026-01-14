@@ -281,6 +281,29 @@ def finance_approve(req_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"msg": "Paid"}
 
+# Add this near your other finance routes in main.py
+
+@app.put("/finance/pay/{req_id}")
+def finance_pay(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    # Logic: Final step in the workflow
+    req.status = "Paid"
+    db.commit()
+    return {"msg": "Payment Released Successfully"}
+
+@app.put("/finance/reject/{req_id}")
+def finance_reject(req_id: int, db: Session = Depends(get_db)):
+    req = db.query(models.Requests).filter_by(req_id=req_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+        
+    req.status = "Rejected"
+    db.commit()
+    return {"msg": "Request Rejected by Finance"}
+
 # --- Policy Routes ---
 
 @app.get("/policies")
