@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, Float
 from sqlalchemy.orm import relationship
 from database import Base
 
@@ -7,9 +7,10 @@ class User(Base):
 
     emp_id = Column(Integer, primary_key=True, index=True)
     name = Column(String(50), nullable=False)
-    role = Column(String(20), nullable=False)
+    role = Column(String(20), nullable=False)  # valid values: 'employee', 'manager', 'finance', 'admin'
     manager_id = Column(Integer, ForeignKey("users.emp_id"), nullable=True)
 
+    # Relationships
     requests = relationship("Requests", back_populates="employee")
 
 class Requests(Base):
@@ -18,8 +19,12 @@ class Requests(Base):
     req_id = Column(Integer, primary_key=True, index=True)
     emp_id = Column(Integer, ForeignKey("users.emp_id"), nullable=False)
     category = Column(String(50))
+    amount = Column(Float, nullable=False)
     description = Column(String(200))
     image_path = Column(String(255), nullable=True)
+    
+    # Status flows: Pending -> Manager Approved -> Paid
+    # Or for managers: Awaiting Finance -> Paid
     status = Column(String(20), default="Pending")
 
     employee = relationship("User", back_populates="requests")

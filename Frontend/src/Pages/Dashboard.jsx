@@ -3,7 +3,7 @@ import api from "../api";
 
 // Component Imports
 import Topbar from "../Components/Topbar";
-import Sidebar from "../Components/Sidebar";
+// import Sidebar from "../Components/Sidebar"; // Uncomment if you use it
 import EmployeeView from "../Components/EmployeeView";
 import ManagerView from "../Components/ManagerView";
 import FinanceView from "../Components/FinanceView";
@@ -15,29 +15,42 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
-  const emp_id = localStorage.getItem("emp_id");
+  // Get ID from local storage
+  const emp_id_raw = localStorage.getItem("emp_id");
 
   useEffect(() => {
-    if (!emp_id) {
+    // 1. Safety Check: If no ID exists, stop immediately
+    if (!emp_id_raw) {
       setError("No user ID found. Please login again.");
       setLoading(false);
       return;
     }
 
-    // Fetching dashboard data from FastAPI
-    api.post("/dashboard", { emp_id: parseInt(emp_id) })
+    // 2. Parse ID safely
+    const emp_id = parseInt(emp_id_raw);
+    if (isNaN(emp_id)) {
+        setError("Invalid User ID format.");
+        setLoading(false);
+        return;
+    }
+
+    // 3. Fetch Data
+    api.post("/dashboard", { emp_id: emp_id })
       .then((res) => {
+        console.log("Dashboard Data Loaded:", res.data); // Debugging log
         setData(res.data);
         setLoading(false);
       })
       .catch((err) => {
         console.error("API Error:", err);
-        setError("Failed to connect to the server. Is the backend running?");
+        // Better error message handling
+        const msg = err.response?.data?.detail || "Failed to connect to the server.";
+        setError(msg);
         setLoading(false);
       });
-  }, [emp_id]);
+  }, [emp_id_raw]);
 
-  // 1. Loading State
+  // --- Loading State ---
   if (loading) {
     return (
       <div className="h-screen w-full flex flex-col items-center justify-center bg-gray-50">
@@ -47,7 +60,7 @@ export default function Dashboard() {
     );
   }
 
-  // 2. Error State
+  // --- Error State ---
   if (error) {
     return (
       <div className="h-screen w-full flex items-center justify-center bg-gray-50 p-4">
@@ -56,7 +69,10 @@ export default function Dashboard() {
           <h2 className="text-xl font-bold text-gray-800 mb-2">System Error</h2>
           <p className="text-gray-600 mb-6">{error}</p>
           <button 
-            onClick={() => window.location.href = "/"}
+            onClick={() => {
+                localStorage.clear(); // Clear bad data
+                window.location.href = "/";
+            }}
             className="bg-blue-600 text-white px-6 py-2 rounded-lg font-bold hover:bg-blue-700 transition-all"
           >
             Back to Login
@@ -66,15 +82,13 @@ export default function Dashboard() {
     );
   }
 
-  // 3. Main Dashboard Layout
+  // --- Main Dashboard Layout ---
   return (
-    <div className="flex min-h-screen bg-[#F8FAFC]"> {/* Slate-50 background */}
+    <div className="flex min-h-screen bg-[#F8FAFC]">
       
-      {/* Dynamic Sidebar - passes role to show/hide links */}
       {/* <Sidebar role={data.role} /> */}
 
       <div className="flex-1 flex flex-col">
-        {/* Modern Topbar - passes name/role for the profile badge */}
         <Topbar name={data.name} role={data.role} />
 
         <main className="p-8 overflow-y-auto">
@@ -96,6 +110,8 @@ export default function Dashboard() {
 
             {data.role === "manager" && (
               <ManagerView 
+                // FIX: Passed currentUser so ManagerView can fetch the team list
+                currentUser={data} 
                 teamRequests={data.team_requests} 
                 myRequests={data.my_requests} 
               />

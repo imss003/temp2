@@ -10,7 +10,7 @@ import cloudinary
 import cloudinary.uploader
 from dotenv import load_dotenv
 
-# Ensure these local files exist in your directory
+# Ensure 'database.py' exists with get_db and engine
 from database import get_db, engine
 import models
 
@@ -24,9 +24,23 @@ logger = logging.getLogger(__name__)
 app = FastAPI()
 
 # 1. CORS Middleware
+# main.py
+
+# ... imports ...
+
+app = FastAPI()
+
+# Define the specific origin of your frontend
+# If using Vite, it is usually http://localhost:5173
+# If using Create React App, it is usually http://localhost:3000
+origins = [
+    "http://localhost:3000", 
+    "http://localhost:5173",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,      # <--- CHANGED from ["*"] to specific list
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -41,6 +55,7 @@ cloudinary.config(
 )
 
 # --- Pydantic Schemas ---
+
 class DashboardRequest(BaseModel):
     emp_id: int
 
@@ -48,11 +63,14 @@ class UserCreate(BaseModel):
     emp_id: int
     name: str
     role: str
-    manager_id: Optional[Any] = None
+    # Accepts int or None
+    manager_id: Optional[int] = None 
 
 class RequestUpdate(BaseModel):
     category: str
     description: str
+    # FIX: Added amount here, otherwise data.amount fails in the route
+    amount: float 
 
 class PolicyCreate(BaseModel):
     category: str
@@ -63,8 +81,8 @@ class PolicyCreate(BaseModel):
 @app.on_event("startup")
 def seed_admin_only():
     db = next(get_db())
-    admin = db.query(models.User).filter_by(emp_id=1).first()
-    if not admin:
+    # check if ANY user exists to prevent constant re-querying on restarts in production
+    if not db.query(models.User).filter_by(emp_id=1).first():
         master_admin = models.User(
             emp_id=1, 
             name="Master Admin", 
@@ -83,7 +101,8 @@ async def create_request(
     emp_id: int = Form(...), 
     category: str = Form(...), 
     description: str = Form(...),
-    file: Optional[UploadFile] = File(None), # Optional File
+    amount: float = Form(...),
+    file: Optional[UploadFile] = File(None),
     db: Session = Depends(get_db)
 ):
     try:
@@ -93,7 +112,7 @@ async def create_request(
 
         image_url = None
         
-        # LOGIC: Only upload if a file exists and has a filename
+        # Upload to Cloudinary only if file is provided
         if file and file.filename:
             file.file.seek(0)
             upload_result = cloudinary.uploader.upload(
@@ -103,13 +122,15 @@ async def create_request(
             )
             image_url = upload_result.get("secure_url")
 
+        # Logic: If Manager submits, skip Manager Approval step
         initial_status = "Awaiting Finance" if user.role == "manager" else "Pending"
 
         new_req = models.Requests(
             emp_id=emp_id,
             category=category,
             description=description,
-            image_path=image_url, # Will be None if no file uploaded
+            amount=amount,
+            image_path=image_url,
             status=initial_status
         )
         db.add(new_req)
@@ -128,7 +149,9 @@ def update_request(req_id: int, data: RequestUpdate, db: Session = Depends(get_d
     
     req.category = data.category
     req.description = data.description
-    req.status = "Pending" # Reset status for re-approval
+    req.amount = data.amount
+    # Reset status so it has to be approved again
+    req.status = "Pending" 
     
     db.commit()
     return {"message": "Request updated successfully"}
@@ -160,11 +183,18 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
         response["my_requests"] = db.query(models.Requests).filter_by(emp_id=user.emp_id).all()
     
     elif user.role == "manager":
+        # Get requests from anyone who reports to this manager
         team_ids = [u.emp_id for u in db.query(models.User).filter_by(manager_id=user.emp_id).all()]
-        response["team_requests"] = db.query(models.Requests).filter(models.Requests.emp_id.in_(team_ids)).all()
+        
+        # Only show Pending requests in the team queue
+        response["team_requests"] = db.query(models.Requests)\
+            .filter(models.Requests.emp_id.in_(team_ids))\
+            .filter(models.Requests.status == "Pending").all()
+            
         response["my_requests"] = db.query(models.Requests).filter_by(emp_id=user.emp_id).all()
 
     elif user.role == "finance":
+        # Finance sees Manager Approved items OR items submitted directly by Managers
         response["finance_queue"] = db.query(models.Requests)\
             .filter(models.Requests.status.in_(["Manager Approved", "Awaiting Finance"])).all()
 
@@ -183,34 +213,50 @@ def dashboard(data: DashboardRequest, db: Session = Depends(get_db)):
 def get_users(db: Session = Depends(get_db)):
     return db.query(models.User).all()
 
+# ... inside main.py ...
+
 @app.post("/admin/user")
 def add_user(user: UserCreate, db: Session = Depends(get_db)):
     m_id = user.manager_id
-    # Clean up manager_id
-    if m_id in ["", 0, None]:
-        m_id = None
+    
+    # --- LOGIC UPDATE START ---
+    # Automatically assign Manager ID = 1 (Master Admin) for specific roles
+    if user.role in ["manager", "finance", "audit"]:
+        m_id = 1
+    # --- LOGIC UPDATE END ---
+    
+    # Logic: Only check DB if m_id is actually provided (not None or 0)
+    elif m_id:
+        manager_exists = db.query(models.User).filter_by(emp_id=m_id).first()
+        if not manager_exists:
+            raise HTTPException(status_code=400, detail=f"Manager ID {m_id} does not exist")
     else:
-        try:
-            m_id = int(m_id)
-            if not db.query(models.User).filter_by(emp_id=m_id).first():
-                raise HTTPException(status_code=400, detail=f"Manager {m_id} doesn't exist")
-        except: m_id = None
+        m_id = None # Ensure 0 becomes None for database consistency
 
     if db.query(models.User).filter_by(emp_id=user.emp_id).first():
-        raise HTTPException(status_code=400, detail="ID already exists")
+        raise HTTPException(status_code=400, detail="User ID already exists")
 
-    new_user = models.User(emp_id=user.emp_id, name=user.name, role=user.role, manager_id=m_id)
+    new_user = models.User(
+        emp_id=user.emp_id, 
+        name=user.name, 
+        role=user.role, 
+        manager_id=m_id
+    )
     db.add(new_user)
     db.commit()
-    return {"message": "User added"}
+    return {"message": "User added successfully"}
 
 @app.delete("/admin/user/{emp_id}")
 def delete_user(emp_id: int, db: Session = Depends(get_db)):
-    if emp_id == 1: raise HTTPException(status_code=400, detail="Cannot delete Master Admin")
+    if emp_id == 1: 
+        raise HTTPException(status_code=400, detail="Cannot delete Master Admin")
+    
     user = db.query(models.User).filter_by(emp_id=emp_id).first()
-    if user:
-        db.delete(user)
-        db.commit()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+        
+    db.delete(user)
+    db.commit()
     return {"message": "User deleted"}
 
 # --- Status Update Routes ---
@@ -218,34 +264,34 @@ def delete_user(emp_id: int, db: Session = Depends(get_db)):
 @app.put("/manager/approve/{req_id}")
 def manager_approve(req_id: int, db: Session = Depends(get_db)):
     req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if req: 
-        req.status = "Manager Approved"
-        db.commit()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    
+    req.status = "Manager Approved"
+    db.commit()
     return {"msg": "Approved"}
 
 @app.put("/manager/reject/{req_id}")
 def manager_reject(req_id: int, db: Session = Depends(get_db)):
     req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if req: 
-        req.status = "Rejected"
-        db.commit()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+        
+    req.status = "Rejected"
+    db.commit()
     return {"msg": "Rejected"}
 
 @app.put("/finance/approve/{req_id}")
 def finance_approve(req_id: int, db: Session = Depends(get_db)):
     req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if req: 
-        req.status = "Paid"
-        db.commit()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+        
+    req.status = "Paid"
+    db.commit()
     return {"msg": "Paid"}
 
-@app.put("/finance/pay/{req_id}")
-def finance_pay(req_id: int, db: Session = Depends(get_db)):
-    req = db.query(models.Requests).filter_by(req_id=req_id).first()
-    if req: 
-        req.status = "Paid"
-        db.commit()
-    return {"msg": "Paid"}
+# --- Policy Routes ---
 
 @app.get("/policies")
 def get_policies(db: Session = Depends(get_db)):
@@ -253,6 +299,30 @@ def get_policies(db: Session = Depends(get_db)):
 
 @app.post("/admin/policy")
 def create_policy(policy: PolicyCreate, db: Session = Depends(get_db)):
-    db.merge(models.Policy(**policy.dict()))
+    # Merge handles both insert and update if primary key matches
+    existing = db.query(models.Policy).filter_by(category=policy.category).first()
+    if existing:
+        existing.amount_limit = policy.amount_limit
+        existing.description = policy.description
+    else:
+        new_policy = models.Policy(**policy.dict())
+        db.add(new_policy)
+        
     db.commit()
     return {"message": "Policy Updated"}
+
+# manager can see their team members
+@app.get("/manager/team/{manager_id}")
+def get_team_members(manager_id: int, db: Session = Depends(get_db)):
+    # Verify the manager exists first
+    manager = db.query(models.User).filter_by(emp_id=manager_id).first()
+    if not manager:
+        raise HTTPException(status_code=404, detail="Manager not found")
+
+    # Query: Find all users where the 'manager_id' matches the requested ID
+    team_members = db.query(models.User).filter_by(manager_id=manager_id).all()
+    
+    if not team_members:
+        return {"message": "No direct reports found", "team": []}
+
+    return {"team": team_members}
