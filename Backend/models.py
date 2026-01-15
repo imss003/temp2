@@ -12,13 +12,13 @@ class User(Base):
     manager_id = Column(Integer, ForeignKey("users.emp_id"), nullable=True)
 
     # Relationships
-    requests = relationship("Requests", back_populates="employee")
+    requests = relationship("Requests", back_populates="employee", cascade="all, delete-orphan")
 
 class Requests(Base):
     __tablename__ = "requests"
 
     req_id = Column(Integer, primary_key=True, index=True)
-    emp_id = Column(Integer, ForeignKey("users.emp_id"), nullable=False)
+    emp_id = Column(Integer, ForeignKey("users.emp_id", ondelete="CASCADE"), nullable=False)
     category = Column(String(50))
     amount = Column(Float, nullable=False)
     description = Column(String(200))

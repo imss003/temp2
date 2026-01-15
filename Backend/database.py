@@ -10,8 +10,8 @@ DATABASE_URL = (
  
 engine = create_engine(
     DATABASE_URL,
-    pool_pre_ping=True,   # prevents stale connection issues
-    echo=True             # optional: shows SQL queries in console
+    pool_pre_ping=True,   
+    echo=True             
 )
  
 SessionLocal = sessionmaker(

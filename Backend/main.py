@@ -245,12 +245,22 @@ def add_user(user: UserCreate, db: Session = Depends(get_db)):
 def delete_user(emp_id: int, db: Session = Depends(get_db)):
     if emp_id == 1: 
         raise HTTPException(status_code=400, detail="Cannot delete Master Admin")
+    
     user = db.query(models.User).filter_by(emp_id=emp_id).first()
+    
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    db.delete(user)
-    db.commit()
-    return {"message": "User deleted"}
+    
+    try:
+        # If you set up the relationship cascade in models.py, 
+        # deleting the user here will automatically delete their requests.
+        db.delete(user)
+        db.commit()
+        return {"message": f"User {emp_id} and all associated requests deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Deletion Error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Internal Server Error during deletion")
 
 # --- Status Update Routes ---
 
