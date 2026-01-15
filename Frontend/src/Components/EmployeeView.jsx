@@ -1,7 +1,6 @@
 import { useState, useEffect } from "react";
 import api from "../api";
 import RequestTable from "./RequestTable";
-import imageCompression from "browser-image-compression";
 import { EXPENSE_CATEGORIES } from "../constants";
 
 export default function EmployeeView({ requests }) {

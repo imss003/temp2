@@ -9,14 +9,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session, joinedload
 from pydantic import BaseModel
-from dotenv import load_dotenv
 
 # Ensure 'database.py' exists with get_db and engine
 from database import get_db, engine
 import models
 
 # --- Setup & Configuration ---
-load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
 logging.basicConfig(level=logging.INFO)
